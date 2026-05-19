@@ -5,39 +5,106 @@ import SwiftData
 import SwiftUI
 
 @main
-struct AccrueApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var appModel = AccrueAppModel.shared
-    @StateObject private var telemetryController = AccrueTelemetryController.shared
-    @AppStorage("showMenuBarPresence") private var showMenuBarPresence = true
-
-    init() {
+enum AccrueMain {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)
+        ProcessInfo.processInfo.disableAutomaticTermination("Accrue menu bar utility")
         AccrueTelemetryController.shared.start()
-    }
-
-    var body: some Scene {
-        MenuBarExtra(isInserted: $showMenuBarPresence) {
-            AccrueMenuContent()
-                .environmentObject(appModel)
-                .environmentObject(telemetryController)
-        } label: {
-            AccrueMenuBarLabel()
-                .environmentObject(appModel)
-        }
-        .menuBarExtraStyle(.window)
+        app.run()
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let appModel = AccrueAppModel.shared
+    private let telemetryController = AccrueTelemetryController.shared
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let popover = NSPopover()
+    private var statusTimer: Timer?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            AccrueAppModel.shared.openActivationSetupIfNeeded()
+        configureStatusItem()
+        updateStatusItem()
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateStatusItem()
+            }
         }
+
+        appModel.openActivationSetupIfNeeded(
+            force: ProcessInfo.processInfo.arguments.contains("--show-setup")
+        )
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         AccrueAppModel.shared.openActivationSetup()
         return true
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    private func configureStatusItem() {
+        popover.behavior = .transient
+        popover.contentSize = NSSize(width: 260, height: 440)
+        popover.contentViewController = NSHostingController(
+            rootView: AccrueMenuContent()
+                .environmentObject(appModel)
+                .environmentObject(telemetryController)
+        )
+
+        if let button = statusItem.button {
+            button.target = self
+            button.action = #selector(togglePopover)
+        }
+    }
+
+    private func updateStatusItem() {
+        let snapshot = AccrueSnapshotCalculator().snapshot(for: appModel.configuration, at: Date())
+        let defaults = UserDefaults.standard
+        let displayMode = AccrueDisplayMode(rawValue: defaults.string(forKey: "accrueDisplayMode") ?? AccrueDisplayMode.calm.rawValue) ?? .calm
+        let stealthModeEnabled = defaults.bool(forKey: "stealthModeEnabled")
+        let display = MenuBarPresenceRenderer().display(
+            for: snapshot,
+            preferences: MenuBarDisplayPreferences(
+                displayMode: displayMode,
+                stealthModeEnabled: stealthModeEnabled
+            )
+        )
+
+        guard let button = statusItem.button else {
+            return
+        }
+
+        switch display {
+        case .amount(let amount):
+            button.image = nil
+            button.title = amount
+        case .amountWithRate(let amount, let hourlyRate):
+            button.image = nil
+            button.title = "\(amount) \(hourlyRate)"
+        case .symbol(let systemName):
+            button.title = ""
+            button.image = NSImage(systemSymbolName: systemName, accessibilityDescription: "Accrue")
+        }
+    }
+
+    @objc private func togglePopover() {
+        guard let button = statusItem.button else {
+            return
+        }
+
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            appModel.launchAtLoginController.refresh()
+            telemetryController.track(.popoverOpened)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
     }
 }
 
@@ -51,8 +118,7 @@ final class AccrueAppModel: ObservableObject {
     let launchAtLoginController = LaunchAtLoginController()
     let telemetryController = AccrueTelemetryController.shared
 
-    private var setupWindow: NSWindow?
-
+    private var setupWindowController: NSWindowController?
     var configuration: AccrueConfiguration {
         configurationStore.configuration ?? .defaultWorkday
     }
@@ -68,8 +134,8 @@ final class AccrueAppModel: ObservableObject {
         }
     }
 
-    func openActivationSetupIfNeeded() {
-        guard configurationStore.configuration == nil else {
+    func openActivationSetupIfNeeded(force: Bool = false) {
+        guard force || configurationStore.configuration == nil else {
             NSApplication.shared.setActivationPolicy(.accessory)
             return
         }
@@ -80,49 +146,47 @@ final class AccrueAppModel: ObservableObject {
     func openActivationSetup() {
         NSApplication.shared.setActivationPolicy(.regular)
 
-        if let setupWindow {
-            setupWindow.makeKeyAndOrderFront(nil)
-            NSApplication.shared.activate(ignoringOtherApps: true)
+        if let window = setupWindowController?.window {
+            window.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate()
             return
         }
 
-        let view = ActivationSetupView()
+        let setupSize = NSSize(width: 460, height: 520)
+        let setupView = ActivationSetupView()
             .environmentObject(self)
-        let hostingController = NSHostingController(rootView: view)
-        hostingController.view.frame = NSRect(x: 0, y: 0, width: 460, height: 520)
-        let screen = NSScreen.screens.first { $0.frame.origin == .zero } ?? NSScreen.main
-        let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1800, height: 1130)
-        let windowFrame = NSRect(
-            x: screenFrame.midX - 230,
-            y: screenFrame.midY - 260,
-            width: 460,
-            height: 520
-        )
+        let hostingController = NSHostingController(rootView: setupView)
+        hostingController.preferredContentSize = setupSize
+
         let window = NSWindow(
-            contentRect: windowFrame,
+            contentRect: NSRect(origin: .zero, size: setupSize),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
-
         window.title = "Activation Setup"
-        window.contentView = hostingController.view
-        window.collectionBehavior = [.moveToActiveSpace]
+        window.contentViewController = hostingController
         window.isReleasedWhenClosed = false
-        window.level = .floating
-        window.setFrame(windowFrame, display: true)
+        window.collectionBehavior = [.moveToActiveSpace]
+        window.setContentSize(setupSize)
+        window.minSize = setupSize
+        window.center()
+
+        let controller = NSWindowController(window: window)
+        setupWindowController = controller
+        controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
-        setupWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        window.displayIfNeeded()
+        NSApplication.shared.unhide(nil)
+        NSApplication.shared.activate()
     }
 
     func saveSetup(_ draft: AccrueSetupDraft) {
         do {
             try configurationStore.save(draft)
             setupError = nil
-            setupWindow?.close()
-            setupWindow = nil
+            setupWindowController?.close()
+            setupWindowController = nil
             NSApplication.shared.setActivationPolicy(.accessory)
             telemetryController.track(.setupCompleted, parameters: [.payRuleKind: draft.payRuleKind.rawValue])
         } catch {
@@ -132,42 +196,6 @@ final class AccrueAppModel: ObservableObject {
 
     func setLaunchAtLoginEnabled(_ enabled: Bool) {
         launchAtLoginController.setEnabled(enabled)
-    }
-}
-
-private struct AccrueMenuBarLabel: View {
-    @EnvironmentObject private var appModel: AccrueAppModel
-    @AppStorage("accrueDisplayMode") private var displayModeRawValue = AccrueDisplayMode.calm.rawValue
-    @AppStorage("stealthModeEnabled") private var stealthModeEnabled = false
-
-    private let calculator = AccrueSnapshotCalculator()
-    private let renderer = MenuBarPresenceRenderer()
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            let snapshot = calculator.snapshot(for: appModel.configuration, at: timeline.date)
-            let display = renderer.display(
-                for: snapshot,
-                preferences: MenuBarDisplayPreferences(
-                    displayMode: AccrueDisplayMode(rawValue: displayModeRawValue) ?? .calm,
-                    stealthModeEnabled: stealthModeEnabled
-                )
-            )
-
-            switch display {
-            case .amount(let amount):
-                Text(amount)
-                    .monospacedDigit()
-            case .amountWithRate(let amount, let hourlyRate):
-                Text("\(amount) \(hourlyRate)")
-                    .monospacedDigit()
-            case .symbol(let systemName):
-                Image(systemName: systemName)
-            }
-        }
-        .onAppear {
-            appModel.openActivationSetupIfNeeded()
-        }
     }
 }
 

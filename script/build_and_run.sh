@@ -2,8 +2,11 @@
 set -euo pipefail
 
 MODE="${1:-run}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
 APP_NAME="Accrue"
-BUNDLE_ID="com.peoplemakethings.accrue"
+BUNDLE_ID="com.hangli1010.accrue"
 MIN_SYSTEM_VERSION="14.0"
 TELEMETRYDECK_APP_ID="${ACCRUE_TELEMETRYDECK_APP_ID:-}"
 
@@ -45,10 +48,18 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
   <key>CFBundleName</key>
+  <string>$APP_NAME</string>
+  <key>CFBundleDisplayName</key>
   <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>
@@ -59,32 +70,57 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
+/usr/bin/codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1
+
 open_app() {
-  /usr/bin/open -n "$APP_BUNDLE"
+  /usr/bin/open "$APP_BUNDLE" --args "$@"
+}
+
+verify_setup_window() {
+  swift -e 'import CoreGraphics
+let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+let matching = windows.filter { window in
+    (window[kCGWindowOwnerName as String] as? String) == "Accrue" &&
+    (window[kCGWindowName as String] as? String) == "Activation Setup"
+}
+guard let window = matching.first,
+      let bounds = window[kCGWindowBounds as String] as? [String: Any],
+      let width = bounds["Width"] as? Int,
+      let height = bounds["Height"] as? Int,
+      width > 0,
+      height > 0
+else {
+    exit(1)
+}
+print("Activation Setup window: \(width)x\(height)")'
 }
 
 case "$MODE" in
   run)
-    open_app
+    open_app "$@"
+    ;;
+  --setup|setup)
+    open_app --show-setup "$@"
     ;;
   --debug|debug)
     lldb -- "$APP_BINARY"
     ;;
   --logs|logs)
-    open_app
+    open_app "$@"
     /usr/bin/log stream --info --style compact --predicate "process == \"$APP_NAME\""
     ;;
   --telemetry|telemetry)
-    open_app
+    open_app "$@"
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
     ;;
   --verify|verify)
-    open_app
-    sleep 1
+    open_app --show-setup "$@"
+    sleep 2
     pgrep -x "$APP_NAME" >/dev/null
+    verify_setup_window
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|setup|--debug|--logs|--telemetry|--verify] [app args...]" >&2
     exit 2
     ;;
 esac
