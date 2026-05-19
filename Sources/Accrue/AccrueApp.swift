@@ -33,7 +33,7 @@ private struct AccrueMenuBarLabel: View {
             case .waiting:
                 Image(systemName: "clock")
             case .accruing, .done:
-                Text(snapshot.formattedAccruedAmount)
+                Text(snapshot.formattedAccruedAmount ?? "")
                     .monospacedDigit()
             case .rest:
                 Image(systemName: "moon")
@@ -57,7 +57,7 @@ private struct AccrueMenuContent: View {
                     Text("Accrued Amount")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(snapshot.formattedAccruedAmount)
+                    Text(snapshot.formattedAccruedAmount ?? "Not accruing now")
                         .font(.title2.monospacedDigit())
                 }
 
