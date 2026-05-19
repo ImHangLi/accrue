@@ -1,0 +1,3 @@
+# Use a menu bar popover as the primary UI
+
+Accrue v1 uses a first-run setup window and a menu bar popover as the primary ongoing interface. This matches the product's ambient role: setup needs focus once, while day-to-day use should stay lightweight, glanceable, and close to the menu bar amount instead of becoming a full settings-heavy app window. The ongoing panel should use native `MenuBarExtra` window-style behavior for real controls, while the app hides its Dock and app-switcher presence. Setup should include a live menu bar preview so the user understands where to look without a redundant completion page.

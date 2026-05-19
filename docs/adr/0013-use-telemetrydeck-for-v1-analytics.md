@@ -1,0 +1,3 @@
+# Use TelemetryDeck for v1 analytics
+
+Accrue v1 uses TelemetryDeck for **Product Analytics** because it is Apple-first, privacy-oriented, and fits a native salary-adjacent utility better than a heavier analytics platform. PostHog can be reevaluated later if product analysis needs exceed TelemetryDeck's model. The app analytics code and event schema are open source, while internal dashboards and analysis stay private; README links to detailed analytics documentation under `docs/`. Source builds default analytics off, while official release builds can default analytics on. App Store builds must include an app privacy manifest and verify the generated privacy report, even when the TelemetryDeck SDK provides its own manifest.
