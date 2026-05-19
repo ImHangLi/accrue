@@ -18,11 +18,12 @@ enum AccrueMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let appModel = AccrueAppModel.shared
     private let telemetryController = AccrueTelemetryController.shared
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    private let popover = NSPopover()
+    private let statusMenu = NSMenu()
+    private let calculator = AccrueSnapshotCalculator()
     private var statusTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -49,22 +50,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureStatusItem() {
-        popover.behavior = .transient
-        popover.contentSize = NSSize(width: 438, height: 648)
-        popover.contentViewController = NSHostingController(
-            rootView: AccrueMenuContent()
-                .environmentObject(appModel)
-                .environmentObject(telemetryController)
-        )
+        statusMenu.autoenablesItems = false
+        statusMenu.delegate = self
+        statusItem.menu = statusMenu
+    }
 
-        if let button = statusItem.button {
-            button.target = self
-            button.action = #selector(togglePopover)
-        }
+    func menuWillOpen(_ menu: NSMenu) {
+        rebuildStatusMenu()
+        telemetryController.track(.popoverOpened)
     }
 
     private func updateStatusItem() {
-        let snapshot = AccrueSnapshotCalculator().snapshot(for: appModel.configuration, at: Date())
+        let snapshot = calculator.snapshot(for: appModel.configuration, at: Date())
         let defaults = UserDefaults.standard
         let displayMode = AccrueDisplayMode(rawValue: defaults.string(forKey: "accrueDisplayMode") ?? AccrueDisplayMode.calm.rawValue) ?? .calm
         let stealthModeEnabled = defaults.bool(forKey: "stealthModeEnabled")
@@ -93,18 +90,158 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func togglePopover() {
-        guard let button = statusItem.button else {
+    @objc private func selectCalmPresence() {
+        setPresenceMode(.calm)
+    }
+
+    @objc private func selectRatePresence() {
+        setPresenceMode(.rate)
+    }
+
+    @objc private func selectStealthPresence() {
+        setPresenceMode(.stealth)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let enabled = !appModel.launchAtLoginController.isEnabled
+        appModel.setLaunchAtLoginEnabled(enabled)
+        telemetryController.track(
+            .launchAtLoginChanged,
+            parameters: [
+                .enabled: String(enabled),
+                .launchAtLoginStatus: appModel.launchAtLoginController.statusLabel,
+            ]
+        )
+    }
+
+    @objc private func toggleProductAnalytics() {
+        guard telemetryController.isAvailable else {
             return
         }
 
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            appModel.launchAtLoginController.refresh()
-            telemetryController.track(.popoverOpened)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        telemetryController.isOptedOut.toggle()
+    }
+
+    @objc private func openActivationSetup() {
+        appModel.openActivationSetup()
+    }
+
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
+    }
+
+    private func rebuildStatusMenu() {
+        appModel.launchAtLoginController.refresh()
+
+        let snapshot = calculator.snapshot(for: appModel.configuration, at: Date())
+        let model = AccrueStatusMenuModel(snapshot: snapshot, configuration: appModel.configuration)
+
+        statusMenu.removeAllItems()
+        statusMenu.addItem(disabledItem("Today"))
+        statusMenu.addItem(disabledItem(model.amountText))
+        statusMenu.addItem(disabledItem("\(model.stateLabel) - \(model.progressPercentText)"))
+        statusMenu.addItem(disabledItem(model.progressDetailText))
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(disabledItem("Rate: \(formatHourlyRate(snapshot))"))
+        statusMenu.addItem(disabledItem("Pay Rule: \(model.payRuleText)"))
+        statusMenu.addItem(disabledItem("Working Hours: \(model.workingHoursText)"))
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(presenceItem("Calm", mode: .calm, action: #selector(selectCalmPresence)))
+        statusMenu.addItem(presenceItem("Rate", mode: .rate, action: #selector(selectRatePresence)))
+        statusMenu.addItem(presenceItem("Stealth", mode: .stealth, action: #selector(selectStealthPresence)))
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(toggleItem(
+            "Launch at Login",
+            isOn: appModel.launchAtLoginController.isEnabled,
+            action: #selector(toggleLaunchAtLogin)
+        ))
+        if let errorMessage = appModel.launchAtLoginController.errorMessage {
+            statusMenu.addItem(disabledItem("Launch at Login: \(errorMessage)"))
         }
+        statusMenu.addItem(toggleItem(
+            "Product Analytics",
+            isOn: telemetryController.isAvailable && !telemetryController.isOptedOut,
+            action: #selector(toggleProductAnalytics),
+            isEnabled: telemetryController.isAvailable
+        ))
+        if !telemetryController.isAvailable {
+            statusMenu.addItem(disabledItem("Analytics off for this build"))
+        }
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(actionItem("Activation Setup...", action: #selector(openActivationSetup)))
+        statusMenu.addItem(actionItem("Quit Accrue", action: #selector(quitApp), keyEquivalent: "q"))
+    }
+
+    private func setPresenceMode(_ mode: AccruePresenceMode) {
+        let defaults = UserDefaults.standard
+
+        switch mode {
+        case .calm:
+            defaults.set(false, forKey: "stealthModeEnabled")
+            defaults.set(AccrueDisplayMode.calm.rawValue, forKey: "accrueDisplayMode")
+            telemetryController.track(.displayModeChanged, parameters: [.displayMode: AccrueDisplayMode.calm.rawValue])
+            telemetryController.track(.stealthModeChanged, parameters: [.enabled: "false"])
+        case .rate:
+            defaults.set(false, forKey: "stealthModeEnabled")
+            defaults.set(AccrueDisplayMode.rate.rawValue, forKey: "accrueDisplayMode")
+            telemetryController.track(.displayModeChanged, parameters: [.displayMode: AccrueDisplayMode.rate.rawValue])
+            telemetryController.track(.stealthModeChanged, parameters: [.enabled: "false"])
+        case .stealth:
+            defaults.set(true, forKey: "stealthModeEnabled")
+            telemetryController.track(.stealthModeChanged, parameters: [.enabled: "true"])
+        }
+
+        updateStatusItem()
+    }
+
+    private func disabledItem(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    private func presenceItem(_ title: String, mode: AccruePresenceMode, action: Selector) -> NSMenuItem {
+        let item = actionItem(title, action: action)
+        item.state = currentPresenceMode == mode ? .on : .off
+        return item
+    }
+
+    private func toggleItem(
+        _ title: String,
+        isOn: Bool,
+        action: Selector,
+        isEnabled: Bool = true
+    ) -> NSMenuItem {
+        let item = actionItem(title, action: action)
+        item.state = isOn ? .on : .off
+        item.isEnabled = isEnabled
+        return item
+    }
+
+    private func actionItem(_ title: String, action: Selector, keyEquivalent: String = "") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
+        item.target = self
+        item.isEnabled = true
+        return item
+    }
+
+    private var currentPresenceMode: AccruePresenceMode {
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: "stealthModeEnabled") {
+            return .stealth
+        }
+        let rawValue = defaults.string(forKey: "accrueDisplayMode") ?? AccrueDisplayMode.calm.rawValue
+        return AccrueDisplayMode(rawValue: rawValue) == .rate ? .rate : .calm
+    }
+
+    private func formatHourlyRate(_ snapshot: AccrueSnapshot) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = snapshot.currencyCode
+        formatter.maximumFractionDigits = 2
+        formatter.minimumFractionDigits = 2
+
+        return "\(formatter.string(from: snapshot.derivedHourlyRate as NSDecimalNumber) ?? "\(snapshot.currencyCode) \(snapshot.derivedHourlyRate)")/h"
     }
 }
 
@@ -199,255 +336,18 @@ final class AccrueAppModel: ObservableObject {
     }
 }
 
-private struct AccrueMenuContent: View {
-    @EnvironmentObject private var appModel: AccrueAppModel
-    @EnvironmentObject private var telemetryController: AccrueTelemetryController
-    @ObservedObject private var launchAtLoginController = AccrueAppModel.shared.launchAtLoginController
-    @AppStorage("accrueDisplayMode") private var displayModeRawValue = AccrueDisplayMode.calm.rawValue
-    @AppStorage("stealthModeEnabled") private var stealthModeEnabled = false
-    @State private var isMoreSettingsExpanded = false
-
-    private let calculator = AccrueSnapshotCalculator()
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            let snapshot = calculator.snapshot(for: appModel.configuration, at: timeline.date)
-            let model = AccruePopoverSnapshotViewModel(
-                snapshot: snapshot,
-                configuration: appModel.configuration
-            )
-
-            VStack(alignment: .leading, spacing: 22) {
-                popoverHeader(for: model)
-                amountPanel(for: model)
-                progressPanel(for: model)
-                metricsPanel(for: model, snapshot: snapshot)
-                presenceControls()
-                settingsDisclosure(for: model)
-            }
-            .padding(28)
-            .frame(width: 438, alignment: .leading)
-            .onAppear {
-                appModel.launchAtLoginController.refresh()
-                telemetryController.track(.popoverOpened)
-            }
-        }
-    }
-
-    private func popoverHeader(for model: AccruePopoverSnapshotViewModel) -> some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Day Accrual")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Text("Today")
-                    .font(.system(size: 32, weight: .bold, design: .default))
-            }
-
-            Spacer()
-
-            Text(model.stateLabel)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(model.stateTint)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(model.stateTint.opacity(0.14), in: Capsule())
-        }
-    }
-
-    private func amountPanel(for model: AccruePopoverSnapshotViewModel) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(model.amountText)
-                .font(.system(size: 72, weight: .bold, design: .default).monospacedDigit())
-                .lineLimit(1)
-                .minimumScaleFactor(0.66)
-
-            HStack {
-                Text("Projected final")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(model.projectedFinalText)
-                    .font(.subheadline.weight(.semibold).monospacedDigit())
-            }
-        }
-        .padding(24)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(.quaternary)
-        }
-    }
-
-    private func progressPanel(for model: AccruePopoverSnapshotViewModel) -> some View {
-        HStack(spacing: 18) {
-            Gauge(value: model.progress) {
-                Text("Progress")
-            } currentValueLabel: {
-                Text(model.progressPercentText)
-                    .font(.caption.weight(.semibold).monospacedDigit())
-            }
-            .gaugeStyle(.accessoryCircularCapacity)
-            .tint(.yellow)
-            .frame(width: 82)
-
-            VStack(alignment: .leading, spacing: 8) {
-                ProgressView(value: model.progress)
-                    .tint(.yellow)
-
-                Text(model.progressDetailText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func metricsPanel(
-        for model: AccruePopoverSnapshotViewModel,
-        snapshot: AccrueSnapshot
-    ) -> some View {
-        HStack(spacing: 0) {
-            MetricCell(label: "Rate", value: formatHourlyRate(snapshot))
-            Divider()
-            MetricCell(label: "Pay Rule", value: model.payRuleText)
-            Divider()
-            MetricCell(label: "Reset", value: model.resetText)
-        }
-        .frame(height: 68)
-        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    private func presenceControls() -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Menu Bar Presence")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            Picker("Menu Bar Presence", selection: presenceModeBinding) {
-                Text("Calm").tag(AccruePresenceMode.calm)
-                Text("Rate").tag(AccruePresenceMode.rate)
-                Text("Stealth").tag(AccruePresenceMode.stealth)
-            }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-        }
-        .padding(.top, 2)
-    }
-
-    private func settingsDisclosure(for model: AccruePopoverSnapshotViewModel) -> some View {
-        DisclosureGroup(isExpanded: $isMoreSettingsExpanded) {
-            VStack(alignment: .leading, spacing: 0) {
-                Divider()
-                AccrueSettingsRow(label: "Working Hours", value: model.workingHoursText)
-                AccrueSettingsToggleRow(
-                    label: "Launch at Login",
-                    isOn: Binding(
-                        get: { launchAtLoginController.isEnabled },
-                        set: { enabled in
-                            appModel.setLaunchAtLoginEnabled(enabled)
-                            telemetryController.track(
-                                .launchAtLoginChanged,
-                                parameters: [
-                                    .enabled: String(enabled),
-                                    .launchAtLoginStatus: launchAtLoginController.statusLabel,
-                                ]
-                            )
-                        }
-                    )
-                )
-                if let errorMessage = launchAtLoginController.errorMessage {
-                    Text(errorMessage)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .padding(.vertical, 6)
-                }
-                AccrueSettingsToggleRow(
-                    label: "Product Analytics",
-                    isOn: Binding(
-                        get: { telemetryController.isAvailable && !telemetryController.isOptedOut },
-                        set: { enabled in
-                            if telemetryController.isAvailable {
-                                telemetryController.isOptedOut = !enabled
-                            }
-                        }
-                    )
-                )
-                .disabled(!telemetryController.isAvailable)
-                if !telemetryController.isAvailable {
-                    Text("Analytics off for this source build")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 6)
-                }
-                AccrueSettingsActionRow(label: "Activation Setup") {
-                    appModel.openActivationSetup()
-                }
-                AccrueSettingsActionRow(label: "Quit Accrue") {
-                    NSApp.terminate(nil)
-                }
-            }
-            .padding(.top, 8)
-        } label: {
-            Text("More settings")
-                .font(.subheadline.weight(.semibold))
-        }
-    }
-
-    private var presenceModeBinding: Binding<AccruePresenceMode> {
-        Binding(
-            get: {
-                if stealthModeEnabled {
-                    return .stealth
-                }
-                return AccrueDisplayMode(rawValue: displayModeRawValue) == .rate ? .rate : .calm
-            },
-            set: { mode in
-                switch mode {
-                case .calm:
-                    stealthModeEnabled = false
-                    displayModeRawValue = AccrueDisplayMode.calm.rawValue
-                    telemetryController.track(.displayModeChanged, parameters: [.displayMode: displayModeRawValue])
-                    telemetryController.track(.stealthModeChanged, parameters: [.enabled: "false"])
-                case .rate:
-                    stealthModeEnabled = false
-                    displayModeRawValue = AccrueDisplayMode.rate.rawValue
-                    telemetryController.track(.displayModeChanged, parameters: [.displayMode: displayModeRawValue])
-                    telemetryController.track(.stealthModeChanged, parameters: [.enabled: "false"])
-                case .stealth:
-                    stealthModeEnabled = true
-                    telemetryController.track(.stealthModeChanged, parameters: [.enabled: "true"])
-                }
-            }
-        )
-    }
-
-    private func formatHourlyRate(_ snapshot: AccrueSnapshot) -> String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .currency
-        formatter.currencyCode = snapshot.currencyCode
-        formatter.maximumFractionDigits = 2
-        formatter.minimumFractionDigits = 2
-
-        return "\(formatter.string(from: snapshot.derivedHourlyRate as NSDecimalNumber) ?? "\(snapshot.currencyCode) \(snapshot.derivedHourlyRate)")/h"
-    }
-}
-
 private enum AccruePresenceMode: Hashable {
     case calm
     case rate
     case stealth
 }
 
-private struct AccruePopoverSnapshotViewModel {
+private struct AccrueStatusMenuModel {
     let snapshot: AccrueSnapshot
     let configuration: AccrueConfiguration
 
     var amountText: String {
         snapshot.formattedAccruedAmount ?? "Not accruing"
-    }
-
-    var projectedFinalText: String {
-        formatCurrency(dailyFinalAmount)
     }
 
     var progress: Double {
@@ -538,15 +438,6 @@ private struct AccruePopoverSnapshotViewModel {
         return formatDuration(hours: max(totalHours - workedHours, 0))
     }
 
-    private func formatCurrency(_ amount: Decimal) -> String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .currency
-        formatter.currencyCode = snapshot.currencyCode
-        formatter.maximumFractionDigits = 2
-        formatter.minimumFractionDigits = 2
-        return formatter.string(from: amount as NSDecimalNumber) ?? "\(snapshot.currencyCode) \(amount)"
-    }
-
     private func hourText(_ hour: Int) -> String {
         "\(hour):00"
     }
@@ -564,70 +455,6 @@ private struct AccruePopoverSnapshotViewModel {
             return "\(hourCount)h"
         }
         return "\(hourCount)h \(minuteCount)m"
-    }
-}
-
-private struct MetricCell: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(label)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.subheadline.weight(.semibold).monospacedDigit())
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12)
-    }
-}
-
-private struct AccrueSettingsRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        LabeledContent {
-            Text(value)
-                .font(.subheadline.weight(.medium).monospacedDigit())
-                .foregroundStyle(.secondary)
-        } label: {
-            Text(label)
-                .font(.subheadline.weight(.medium))
-        }
-        .padding(.vertical, 8)
-    }
-}
-
-private struct AccrueSettingsToggleRow: View {
-    let label: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        Toggle(isOn: $isOn) {
-            Text(label)
-                .font(.subheadline.weight(.medium))
-        }
-        .padding(.vertical, 8)
-    }
-}
-
-private struct AccrueSettingsActionRow: View {
-    let label: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(label)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .buttonStyle(.plain)
-        .font(.subheadline.weight(.medium))
-        .padding(.vertical, 8)
     }
 }
 
