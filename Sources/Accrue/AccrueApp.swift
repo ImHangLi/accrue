@@ -8,12 +8,18 @@ import SwiftUI
 struct AccrueApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var appModel = AccrueAppModel.shared
+    @StateObject private var telemetryController = AccrueTelemetryController.shared
     @AppStorage("showMenuBarPresence") private var showMenuBarPresence = true
+
+    init() {
+        AccrueTelemetryController.shared.start()
+    }
 
     var body: some Scene {
         MenuBarExtra(isInserted: $showMenuBarPresence) {
             AccrueMenuContent()
                 .environmentObject(appModel)
+                .environmentObject(telemetryController)
         } label: {
             AccrueMenuBarLabel()
                 .environmentObject(appModel)
@@ -43,6 +49,7 @@ final class AccrueAppModel: ObservableObject {
 
     let configurationStore: AccrueConfigurationStore
     let launchAtLoginController = LaunchAtLoginController()
+    let telemetryController = AccrueTelemetryController.shared
 
     private var setupWindow: NSWindow?
 
@@ -117,6 +124,7 @@ final class AccrueAppModel: ObservableObject {
             setupWindow?.close()
             setupWindow = nil
             NSApplication.shared.setActivationPolicy(.accessory)
+            telemetryController.track(.setupCompleted, parameters: [.payRuleKind: draft.payRuleKind.rawValue])
         } catch {
             setupError = error.localizedDescription
         }
@@ -165,6 +173,7 @@ private struct AccrueMenuBarLabel: View {
 
 private struct AccrueMenuContent: View {
     @EnvironmentObject private var appModel: AccrueAppModel
+    @EnvironmentObject private var telemetryController: AccrueTelemetryController
     @ObservedObject private var launchAtLoginController = AccrueAppModel.shared.launchAtLoginController
     @AppStorage("accrueDisplayMode") private var displayModeRawValue = AccrueDisplayMode.calm.rawValue
     @AppStorage("stealthModeEnabled") private var stealthModeEnabled = false
@@ -213,13 +222,29 @@ private struct AccrueMenuContent: View {
                     Text("Rate").tag(AccrueDisplayMode.rate.rawValue)
                 }
                 .pickerStyle(.segmented)
+                .onChange(of: displayModeRawValue) { _, value in
+                    telemetryController.track(.displayModeChanged, parameters: [.displayMode: value])
+                }
 
-                Toggle("Stealth Mode", isOn: $stealthModeEnabled)
+                Toggle("Stealth Mode", isOn: Binding(
+                    get: { stealthModeEnabled },
+                    set: { enabled in
+                        stealthModeEnabled = enabled
+                        telemetryController.track(.stealthModeChanged, parameters: [.enabled: String(enabled)])
+                    }
+                ))
 
                 Toggle("Launch at Login", isOn: Binding(
                     get: { launchAtLoginController.isEnabled },
                     set: { enabled in
                         appModel.setLaunchAtLoginEnabled(enabled)
+                        telemetryController.track(
+                            .launchAtLoginChanged,
+                            parameters: [
+                                .enabled: String(enabled),
+                                .launchAtLoginStatus: launchAtLoginController.statusLabel,
+                            ]
+                        )
                     }
                 ))
 
@@ -231,6 +256,22 @@ private struct AccrueMenuContent: View {
                     Text(errorMessage)
                         .font(.caption)
                         .foregroundStyle(.red)
+                }
+
+                Toggle("Product Analytics", isOn: Binding(
+                    get: { telemetryController.isAvailable && !telemetryController.isOptedOut },
+                    set: { enabled in
+                        if telemetryController.isAvailable {
+                            telemetryController.isOptedOut = !enabled
+                        }
+                    }
+                ))
+                .disabled(!telemetryController.isAvailable)
+
+                if !telemetryController.isAvailable {
+                    Text("Analytics off for this source build")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Divider()
@@ -247,6 +288,7 @@ private struct AccrueMenuContent: View {
             .frame(width: 240, alignment: .leading)
             .onAppear {
                 appModel.launchAtLoginController.refresh()
+                telemetryController.track(.popoverOpened)
             }
         }
     }
