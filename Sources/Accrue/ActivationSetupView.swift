@@ -65,6 +65,7 @@ struct ActivationSetupView: View {
                 Button("Start Accruing") {
                     if let draft {
                         appModel.saveSetup(draft)
+                        appModel.setLaunchAtLoginEnabled(launchAtLoginEnabled)
                     }
                 }
                 .buttonStyle(.borderedProminent)
