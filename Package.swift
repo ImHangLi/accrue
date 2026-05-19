@@ -13,12 +13,25 @@ let package = Package(
         .package(path: "AccrueCore"),
     ],
     targets: [
+        .target(
+            name: "AccrueAppSupport",
+            dependencies: [
+                .product(name: "AccrueCore", package: "AccrueCore"),
+            ],
+            path: "Sources/AccrueAppSupport"
+        ),
         .executableTarget(
             name: "Accrue",
             dependencies: [
                 .product(name: "AccrueCore", package: "AccrueCore"),
+                "AccrueAppSupport",
             ],
             path: "Sources/Accrue"
+        ),
+        .testTarget(
+            name: "AccrueAppSupportTests",
+            dependencies: ["AccrueAppSupport"],
+            path: "Tests/AccrueAppSupportTests"
         ),
     ]
 )
