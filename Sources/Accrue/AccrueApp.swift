@@ -50,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureStatusItem() {
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 260, height: 440)
+        popover.contentSize = NSSize(width: 438, height: 648)
         popover.contentViewController = NSHostingController(
             rootView: AccrueMenuContent()
                 .environmentObject(appModel)
@@ -205,120 +205,220 @@ private struct AccrueMenuContent: View {
     @ObservedObject private var launchAtLoginController = AccrueAppModel.shared.launchAtLoginController
     @AppStorage("accrueDisplayMode") private var displayModeRawValue = AccrueDisplayMode.calm.rawValue
     @AppStorage("stealthModeEnabled") private var stealthModeEnabled = false
+    @State private var isMoreSettingsExpanded = false
 
     private let calculator = AccrueSnapshotCalculator()
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
             let snapshot = calculator.snapshot(for: appModel.configuration, at: timeline.date)
+            let model = AccruePopoverSnapshotViewModel(
+                snapshot: snapshot,
+                configuration: appModel.configuration
+            )
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Accrue")
-                    .font(.headline)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Accrued Amount")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(snapshot.formattedAccruedAmount ?? "Not accruing now")
-                        .font(.title2.monospacedDigit())
-                }
-
-                Text(snapshot.state.label)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Derived Hourly Rate")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(formatHourlyRate(snapshot))
-                        .monospacedDigit()
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Working Hours")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("\(appModel.configuration.workStartHour):00-\(appModel.configuration.workEndHour):00")
-                }
-
-                Divider()
-
-                Picker("Display", selection: $displayModeRawValue) {
-                    Text("Calm").tag(AccrueDisplayMode.calm.rawValue)
-                    Text("Rate").tag(AccrueDisplayMode.rate.rawValue)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: displayModeRawValue) { _, value in
-                    telemetryController.track(.displayModeChanged, parameters: [.displayMode: value])
-                }
-
-                Toggle("Stealth Mode", isOn: Binding(
-                    get: { stealthModeEnabled },
-                    set: { enabled in
-                        stealthModeEnabled = enabled
-                        telemetryController.track(.stealthModeChanged, parameters: [.enabled: String(enabled)])
-                    }
-                ))
-
-                Toggle("Launch at Login", isOn: Binding(
-                    get: { launchAtLoginController.isEnabled },
-                    set: { enabled in
-                        appModel.setLaunchAtLoginEnabled(enabled)
-                        telemetryController.track(
-                            .launchAtLoginChanged,
-                            parameters: [
-                                .enabled: String(enabled),
-                                .launchAtLoginStatus: launchAtLoginController.statusLabel,
-                            ]
-                        )
-                    }
-                ))
-
-                Text(launchAtLoginController.statusLabel)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                if let errorMessage = launchAtLoginController.errorMessage {
-                    Text(errorMessage)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-
-                Toggle("Product Analytics", isOn: Binding(
-                    get: { telemetryController.isAvailable && !telemetryController.isOptedOut },
-                    set: { enabled in
-                        if telemetryController.isAvailable {
-                            telemetryController.isOptedOut = !enabled
-                        }
-                    }
-                ))
-                .disabled(!telemetryController.isAvailable)
-
-                if !telemetryController.isAvailable {
-                    Text("Analytics off for this source build")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Divider()
-
-                Button("Activation Setup") {
-                    appModel.openActivationSetup()
-                }
-
-                Button("Quit Accrue") {
-                    NSApp.terminate(nil)
-                }
+            VStack(alignment: .leading, spacing: 22) {
+                popoverHeader(for: model)
+                amountPanel(for: model)
+                progressPanel(for: model)
+                metricsPanel(for: model, snapshot: snapshot)
+                presenceControls()
+                settingsDisclosure(for: model)
             }
-            .padding()
-            .frame(width: 240, alignment: .leading)
+            .padding(28)
+            .frame(width: 438, alignment: .leading)
             .onAppear {
                 appModel.launchAtLoginController.refresh()
                 telemetryController.track(.popoverOpened)
             }
         }
+    }
+
+    private func popoverHeader(for model: AccruePopoverSnapshotViewModel) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Day Accrual")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text("Today")
+                    .font(.system(size: 32, weight: .bold, design: .default))
+            }
+
+            Spacer()
+
+            Text(model.stateLabel)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(model.stateTint)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(model.stateTint.opacity(0.14), in: Capsule())
+        }
+    }
+
+    private func amountPanel(for model: AccruePopoverSnapshotViewModel) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(model.amountText)
+                .font(.system(size: 72, weight: .bold, design: .default).monospacedDigit())
+                .lineLimit(1)
+                .minimumScaleFactor(0.66)
+
+            HStack {
+                Text("Projected final")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(model.projectedFinalText)
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+            }
+        }
+        .padding(24)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(.quaternary)
+        }
+    }
+
+    private func progressPanel(for model: AccruePopoverSnapshotViewModel) -> some View {
+        HStack(spacing: 18) {
+            Gauge(value: model.progress) {
+                Text("Progress")
+            } currentValueLabel: {
+                Text(model.progressPercentText)
+                    .font(.caption.weight(.semibold).monospacedDigit())
+            }
+            .gaugeStyle(.accessoryCircularCapacity)
+            .tint(.yellow)
+            .frame(width: 82)
+
+            VStack(alignment: .leading, spacing: 8) {
+                ProgressView(value: model.progress)
+                    .tint(.yellow)
+
+                Text(model.progressDetailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func metricsPanel(
+        for model: AccruePopoverSnapshotViewModel,
+        snapshot: AccrueSnapshot
+    ) -> some View {
+        HStack(spacing: 0) {
+            MetricCell(label: "Rate", value: formatHourlyRate(snapshot))
+            Divider()
+            MetricCell(label: "Pay Rule", value: model.payRuleText)
+            Divider()
+            MetricCell(label: "Reset", value: model.resetText)
+        }
+        .frame(height: 68)
+        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func presenceControls() -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Menu Bar Presence")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Picker("Menu Bar Presence", selection: presenceModeBinding) {
+                Text("Calm").tag(AccruePresenceMode.calm)
+                Text("Rate").tag(AccruePresenceMode.rate)
+                Text("Stealth").tag(AccruePresenceMode.stealth)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+        }
+        .padding(.top, 2)
+    }
+
+    private func settingsDisclosure(for model: AccruePopoverSnapshotViewModel) -> some View {
+        DisclosureGroup(isExpanded: $isMoreSettingsExpanded) {
+            VStack(alignment: .leading, spacing: 0) {
+                Divider()
+                AccrueSettingsRow(label: "Working Hours", value: model.workingHoursText)
+                AccrueSettingsToggleRow(
+                    label: "Launch at Login",
+                    isOn: Binding(
+                        get: { launchAtLoginController.isEnabled },
+                        set: { enabled in
+                            appModel.setLaunchAtLoginEnabled(enabled)
+                            telemetryController.track(
+                                .launchAtLoginChanged,
+                                parameters: [
+                                    .enabled: String(enabled),
+                                    .launchAtLoginStatus: launchAtLoginController.statusLabel,
+                                ]
+                            )
+                        }
+                    )
+                )
+                if let errorMessage = launchAtLoginController.errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .padding(.vertical, 6)
+                }
+                AccrueSettingsToggleRow(
+                    label: "Product Analytics",
+                    isOn: Binding(
+                        get: { telemetryController.isAvailable && !telemetryController.isOptedOut },
+                        set: { enabled in
+                            if telemetryController.isAvailable {
+                                telemetryController.isOptedOut = !enabled
+                            }
+                        }
+                    )
+                )
+                .disabled(!telemetryController.isAvailable)
+                if !telemetryController.isAvailable {
+                    Text("Analytics off for this source build")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 6)
+                }
+                AccrueSettingsActionRow(label: "Activation Setup") {
+                    appModel.openActivationSetup()
+                }
+                AccrueSettingsActionRow(label: "Quit Accrue") {
+                    NSApp.terminate(nil)
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            Text("More settings")
+                .font(.subheadline.weight(.semibold))
+        }
+    }
+
+    private var presenceModeBinding: Binding<AccruePresenceMode> {
+        Binding(
+            get: {
+                if stealthModeEnabled {
+                    return .stealth
+                }
+                return AccrueDisplayMode(rawValue: displayModeRawValue) == .rate ? .rate : .calm
+            },
+            set: { mode in
+                switch mode {
+                case .calm:
+                    stealthModeEnabled = false
+                    displayModeRawValue = AccrueDisplayMode.calm.rawValue
+                    telemetryController.track(.displayModeChanged, parameters: [.displayMode: displayModeRawValue])
+                    telemetryController.track(.stealthModeChanged, parameters: [.enabled: "false"])
+                case .rate:
+                    stealthModeEnabled = false
+                    displayModeRawValue = AccrueDisplayMode.rate.rawValue
+                    telemetryController.track(.displayModeChanged, parameters: [.displayMode: displayModeRawValue])
+                    telemetryController.track(.stealthModeChanged, parameters: [.enabled: "false"])
+                case .stealth:
+                    stealthModeEnabled = true
+                    telemetryController.track(.stealthModeChanged, parameters: [.enabled: "true"])
+                }
+            }
+        )
     }
 
     private func formatHourlyRate(_ snapshot: AccrueSnapshot) -> String {
@@ -329,6 +429,205 @@ private struct AccrueMenuContent: View {
         formatter.minimumFractionDigits = 2
 
         return "\(formatter.string(from: snapshot.derivedHourlyRate as NSDecimalNumber) ?? "\(snapshot.currencyCode) \(snapshot.derivedHourlyRate)")/h"
+    }
+}
+
+private enum AccruePresenceMode: Hashable {
+    case calm
+    case rate
+    case stealth
+}
+
+private struct AccruePopoverSnapshotViewModel {
+    let snapshot: AccrueSnapshot
+    let configuration: AccrueConfiguration
+
+    var amountText: String {
+        snapshot.formattedAccruedAmount ?? "Not accruing"
+    }
+
+    var projectedFinalText: String {
+        formatCurrency(dailyFinalAmount)
+    }
+
+    var progress: Double {
+        guard dailyFinalAmount > 0, let accruedAmount = snapshot.accruedAmount else {
+            return 0
+        }
+
+        let ratio = accruedAmount / dailyFinalAmount
+        return min(max((ratio as NSDecimalNumber).doubleValue, 0), 1)
+    }
+
+    var progressPercentText: String {
+        progress.formatted(.percent.precision(.fractionLength(0)))
+    }
+
+    var progressDetailText: String {
+        switch snapshot.state {
+        case .waiting:
+            "Starts at \(hourText(configuration.workStartHour))."
+        case .accruing:
+            "\(workedTimeText) worked. \(remainingTimeText) remaining."
+        case .done:
+            "Done for this Day Accrual."
+        case .rest:
+            "Rest State. Next Working Day starts at \(hourText(configuration.workStartHour))."
+        @unknown default:
+            "Current Day Accrual status is unknown."
+        }
+    }
+
+    var stateLabel: String {
+        snapshot.state.label
+    }
+
+    var stateTint: Color {
+        switch snapshot.state {
+        case .accruing:
+            .green
+        case .waiting:
+            .blue
+        case .done:
+            .secondary
+        case .rest:
+            .secondary
+        @unknown default:
+            .secondary
+        }
+    }
+
+    var payRuleText: String {
+        switch configuration.payRule {
+        case .hourlyRate:
+            "Hourly"
+        case .monthlySalary:
+            "Monthly"
+        case .annualSalary:
+            "Annual"
+        }
+    }
+
+    var resetText: String {
+        hourText(configuration.workStartHour)
+    }
+
+    var workingHoursText: String {
+        "\(hourText(configuration.workStartHour))-\(hourText(configuration.workEndHour))"
+    }
+
+    private var dailyFinalAmount: Decimal {
+        configuration.payRule.derivedHourlyRate(using: configuration.salaryAssumptions) * Decimal(max(configuration.workEndHour - configuration.workStartHour, 0))
+    }
+
+    private var workedTimeText: String {
+        guard let accruedAmount = snapshot.accruedAmount, snapshot.derivedHourlyRate > 0 else {
+            return "0m"
+        }
+
+        return formatDuration(hours: accruedAmount / snapshot.derivedHourlyRate)
+    }
+
+    private var remainingTimeText: String {
+        let totalHours = Decimal(max(configuration.workEndHour - configuration.workStartHour, 0))
+        guard let accruedAmount = snapshot.accruedAmount, snapshot.derivedHourlyRate > 0 else {
+            return formatDuration(hours: totalHours)
+        }
+
+        let workedHours = accruedAmount / snapshot.derivedHourlyRate
+        return formatDuration(hours: max(totalHours - workedHours, 0))
+    }
+
+    private func formatCurrency(_ amount: Decimal) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = snapshot.currencyCode
+        formatter.maximumFractionDigits = 2
+        formatter.minimumFractionDigits = 2
+        return formatter.string(from: amount as NSDecimalNumber) ?? "\(snapshot.currencyCode) \(amount)"
+    }
+
+    private func hourText(_ hour: Int) -> String {
+        "\(hour):00"
+    }
+
+    private func formatDuration(hours: Decimal) -> String {
+        let minutes = max(0, (hours as NSDecimalNumber).doubleValue * 60)
+        let wholeMinutes = Int(minutes.rounded())
+        let hourCount = wholeMinutes / 60
+        let minuteCount = wholeMinutes % 60
+
+        if hourCount == 0 {
+            return "\(minuteCount)m"
+        }
+        if minuteCount == 0 {
+            return "\(hourCount)h"
+        }
+        return "\(hourCount)h \(minuteCount)m"
+    }
+}
+
+private struct MetricCell: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+    }
+}
+
+private struct AccrueSettingsRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        LabeledContent {
+            Text(value)
+                .font(.subheadline.weight(.medium).monospacedDigit())
+                .foregroundStyle(.secondary)
+        } label: {
+            Text(label)
+                .font(.subheadline.weight(.medium))
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+private struct AccrueSettingsToggleRow: View {
+    let label: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            Text(label)
+                .font(.subheadline.weight(.medium))
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+private struct AccrueSettingsActionRow: View {
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .font(.subheadline.weight(.medium))
+        .padding(.vertical, 8)
     }
 }
 

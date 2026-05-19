@@ -124,6 +124,7 @@ _Avoid_: Device sync, iPhone sync
 - A **Pay Rule** can be an **Hourly Rate**, **Monthly Salary**, or **Annual Salary**
 - An **Annual Salary** or **Monthly Salary** uses **Salary Assumptions** to derive an **Hourly Rate**
 - **Activation Setup** includes currency and **Pay Rule**
+- **Activation Setup** excludes device preferences such as launch at login
 - **Calm Mode** is the default display mode
 - **Rate Mode** is optional
 - **Menu Bar Presence** is the primary way users interact with Accrue

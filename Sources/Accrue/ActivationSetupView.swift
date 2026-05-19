@@ -4,7 +4,6 @@ import SwiftUI
 
 struct ActivationSetupView: View {
     @EnvironmentObject private var appModel: AccrueAppModel
-    @AppStorage("launchAtLoginEnabled") private var launchAtLoginEnabled = true
 
     @State private var currencyCode = Locale.current.currency?.identifier ?? "USD"
     @State private var payRuleKind = StoredPayRuleKind.hourlyRate
@@ -50,8 +49,6 @@ struct ActivationSetupView: View {
 
                 TextField(payRuleKind.title, text: $payAmountText)
                     .textFieldStyle(.roundedBorder)
-
-                Toggle("Launch at Login", isOn: $launchAtLoginEnabled)
             }
 
             if let setupError = appModel.setupError {
@@ -65,7 +62,6 @@ struct ActivationSetupView: View {
                 Button("Start Accruing") {
                     if let draft {
                         appModel.saveSetup(draft)
-                        appModel.setLaunchAtLoginEnabled(launchAtLoginEnabled)
                     }
                 }
                 .buttonStyle(.borderedProminent)
