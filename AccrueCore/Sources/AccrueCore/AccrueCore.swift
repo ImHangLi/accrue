@@ -2,20 +2,23 @@ import Foundation
 
 public struct AccrueConfiguration: Equatable, Sendable {
     public var currencyCode: String
-    public var hourlyRate: Decimal
+    public var payRule: PayRule
+    public var salaryAssumptions: SalaryAssumptions
     public var workStartHour: Int
     public var workEndHour: Int
     public var workingWeekdays: Set<Int>
 
     public init(
         currencyCode: String,
-        hourlyRate: Decimal,
+        payRule: PayRule,
+        salaryAssumptions: SalaryAssumptions = .standardFullTime,
         workStartHour: Int,
         workEndHour: Int,
         workingWeekdays: Set<Int>
     ) {
         self.currencyCode = currencyCode
-        self.hourlyRate = hourlyRate
+        self.payRule = payRule
+        self.salaryAssumptions = salaryAssumptions
         self.workStartHour = workStartHour
         self.workEndHour = workEndHour
         self.workingWeekdays = workingWeekdays
@@ -23,11 +26,48 @@ public struct AccrueConfiguration: Equatable, Sendable {
 
     public static let defaultWorkday = AccrueConfiguration(
         currencyCode: Locale.current.currency?.identifier ?? "USD",
-        hourlyRate: 50,
+        payRule: .hourlyRate(50),
         workStartHour: 9,
         workEndHour: 17,
         workingWeekdays: [2, 3, 4, 5, 6]
     )
+}
+
+public enum PayRule: Equatable, Sendable {
+    case hourlyRate(Decimal)
+    case monthlySalary(Decimal)
+    case annualSalary(Decimal)
+
+    public func derivedHourlyRate(using assumptions: SalaryAssumptions) -> Decimal {
+        switch self {
+        case .hourlyRate(let amount):
+            amount
+        case .monthlySalary(let amount):
+            amount / assumptions.monthlyPaidHours
+        case .annualSalary(let amount):
+            amount / assumptions.annualPaidHours
+        }
+    }
+}
+
+public struct SalaryAssumptions: Equatable, Sendable {
+    public var hoursPerWeek: Decimal
+    public var weeksPerYear: Decimal
+
+    public var annualPaidHours: Decimal {
+        hoursPerWeek * weeksPerYear
+    }
+
+    public var monthlyPaidHours: Decimal {
+        annualPaidHours / 12
+    }
+
+    public init(hoursPerWeek: Decimal, weeksPerYear: Decimal) {
+        self.hoursPerWeek = hoursPerWeek
+        self.weeksPerYear = weeksPerYear
+    }
+
+    public static let standardFullTime = SalaryAssumptions(hoursPerWeek: 40, weeksPerYear: 52)
 }
 
 public enum AccrualState: Equatable, Sendable {
@@ -86,12 +126,14 @@ public struct AccrueSnapshotCalculator: Sendable {
         locale: Locale = .current
     ) -> AccrueSnapshot {
         let weekday = calendar.component(.weekday, from: date)
+        let derivedHourlyRate = configuration.payRule.derivedHourlyRate(using: configuration.salaryAssumptions)
 
         guard configuration.workingWeekdays.contains(weekday) else {
             return makeSnapshot(
                 state: .rest,
                 amount: nil,
                 configuration: configuration,
+                derivedHourlyRate: derivedHourlyRate,
                 locale: locale,
                 nextTransition: nextWorkStart(after: date, configuration: configuration, calendar: calendar)
                     .map { AccrualTransition(date: $0, state: .accruing) }
@@ -116,6 +158,7 @@ public struct AccrueSnapshotCalculator: Sendable {
                 state: .waiting,
                 amount: nil,
                 configuration: configuration,
+                derivedHourlyRate: derivedHourlyRate,
                 locale: locale,
                 nextTransition: AccrualTransition(date: start, state: .accruing)
             )
@@ -124,7 +167,7 @@ public struct AccrueSnapshotCalculator: Sendable {
         let effectiveEnd = min(date, end)
         let elapsedSeconds = max(0, effectiveEnd.timeIntervalSince(start))
         let elapsedHours = Decimal(elapsedSeconds / 3_600)
-        let amount = configuration.hourlyRate * elapsedHours
+        let amount = derivedHourlyRate * elapsedHours
         let state: AccrualState = date >= end ? .done : .accruing
         let nextTransition = nextTransitionAfter(
             date: date,
@@ -138,6 +181,7 @@ public struct AccrueSnapshotCalculator: Sendable {
             state: state,
             amount: amount,
             configuration: configuration,
+            derivedHourlyRate: derivedHourlyRate,
             locale: locale,
             nextTransition: nextTransition
         )
@@ -147,6 +191,7 @@ public struct AccrueSnapshotCalculator: Sendable {
         state: AccrualState,
         amount: Decimal?,
         configuration: AccrueConfiguration,
+        derivedHourlyRate: Decimal,
         locale: Locale,
         nextTransition: AccrualTransition?
     ) -> AccrueSnapshot {
@@ -157,7 +202,7 @@ public struct AccrueSnapshotCalculator: Sendable {
             formattedAccruedAmount: amount.map {
                 format(amount: $0, currencyCode: configuration.currencyCode, locale: locale)
             },
-            derivedHourlyRate: configuration.hourlyRate,
+            derivedHourlyRate: derivedHourlyRate,
             nextTransition: nextTransition
         )
     }
